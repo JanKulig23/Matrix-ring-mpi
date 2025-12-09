@@ -29,6 +29,7 @@ vector<double> generateMatrix(int N) {
     return A;
 }
 
+// Funkcja sekwencyjna (wykonywana tylko przez jeden proces dla porównania)
 void invertSequential(vector<double> A, int N) {
     vector<double> I(N * N, 0.0);
     for (int i = 0; i < N; i++) I[i * N + i] = 1.0;
@@ -59,7 +60,7 @@ int main(int argc, char** argv) {
     // 1. TWORZENIE PIERŚCIENIA
     MPI_Comm cart_comm;
     int dims[1] = {world_size};
-    int periods[1] = {1}; // 1 = Pierścień (Cykliczny) [cite: 80]
+    int periods[1] = {1}; // 1 = Pierścień (Cykliczny)
     int reorder = 1;      
     MPI_Cart_create(MPI_COMM_WORLD, 1, dims, periods, reorder, &cart_comm);
 
@@ -67,13 +68,13 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(cart_comm, &rank);
     MPI_Comm_size(cart_comm, &size);
 
-    // 2. USTALENIE SĄSIADÓW (MPI_Cart_shift)
-    // left - sąsiad, od którego odbieram (w tym schemacie)
+    // 2. USTALENIE SĄSIADÓW
+    // left - sąsiad, od którego odbieram
     // right - sąsiad, do którego wysyłam
     int left, right;
-    MPI_Cart_shift(cart_comm, 0, 1, &left, &right); // [cite: 76]
+    MPI_Cart_shift(cart_comm, 0, 1, &left, &right);
 
-    // Weryfikacja dla pewności (tylko raz)
+    // Weryfikacja topologii (tylko raz)
     if (rank == 0) {
         printf("--- Weryfikacja Ring (Shift) ---\n");
     }
@@ -91,7 +92,7 @@ int main(int argc, char** argv) {
         int N = 0;
         if (rank == 0) N = test_sizes[t];
 
-        // Tu nadal używamy Bcast dla wygody przesyłania rozmiaru N (to nie część algorytmu macierzy)
+        // Rozgłoszenie rozmiaru N (techniczne)
         MPI_Bcast(&N, 1, MPI_INT, 0, cart_comm);
 
         if (N % size != 0) {
@@ -106,13 +107,18 @@ int main(int argc, char** argv) {
         vector<double> local_A(elements_per_proc);
         vector<double> local_I(elements_per_proc, 0.0);
 
+        // Inicjalizacja lokalnego I
         int start_row = rank * rows_per_proc;
         for (int i = 0; i < rows_per_proc; i++) {
             local_I[i * N + (start_row + i)] = 1.0; 
         }
 
+        double seq_duration = 0.0;
+
+        // --- CZĘŚĆ 1: PRZYGOTOWANIE I OBLICZENIA SEKWENCYJNE (TYLKO RANK 0) ---
         if (rank == 0) {
             cout << "\n=== N = " << N << " ===" << endl;
+            
             if (N == 3) {
                 global_A = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0};
                 cout << "Macierz wejsciowa (3x3):" << endl;
@@ -120,9 +126,19 @@ int main(int argc, char** argv) {
             } else {
                 global_A = generateMatrix(N);
             }
+
+            // Pomiar czasu sekwencyjnego
+            vector<double> A_seq_copy = global_A; // Kopia
+            double t_seq_start = MPI_Wtime();
+            invertSequential(A_seq_copy, N);
+            double t_seq_end = MPI_Wtime();
+            
+            seq_duration = t_seq_end - t_seq_start;
+            cout << "Sekwencyjnie (1 proces): " << seq_duration << " s" << endl;
         }
 
-        MPI_Barrier(cart_comm); 
+        // --- CZĘŚĆ 2: OBLICZENIA RÓWNOLEGŁE (MPI RING) ---
+        MPI_Barrier(cart_comm);
         double t_par_start = MPI_Wtime();
 
         // Rozesłanie danych (Scatter)
@@ -133,7 +149,7 @@ int main(int argc, char** argv) {
         vector<double> pivot_row_A(N);
         vector<double> pivot_row_I(N);
 
-        // --- GŁÓWNA PĘTLA ---
+        // Pętla algorytmu
         for (int k = 0; k < N; k++) {
             int owner_rank = k / rows_per_proc;
             int local_k = k % rows_per_proc;
@@ -155,25 +171,23 @@ int main(int argc, char** argv) {
                     local_I[local_k * N + j] = pivot_row_I[j];
                 }
 
-                // ZAMIENNIK BCAST: Wyślij do prawego sąsiada
-                // Tag 0 dla macierzy A, Tag 1 dla macierzy I
-                MPI_Send(pivot_row_A.data(), N, MPI_DOUBLE, right, 0, cart_comm); // [cite: 27]
+                // Sztafeta: Wyślij do prawego sąsiada
+                MPI_Send(pivot_row_A.data(), N, MPI_DOUBLE, right, 0, cart_comm);
                 MPI_Send(pivot_row_I.data(), N, MPI_DOUBLE, right, 1, cart_comm);
             } 
             else {
                 // Krok 2: Pozostali odbierają od lewego sąsiada
-                MPI_Recv(pivot_row_A.data(), N, MPI_DOUBLE, left, 0, cart_comm, MPI_STATUS_IGNORE); // [cite: 28]
+                MPI_Recv(pivot_row_A.data(), N, MPI_DOUBLE, left, 0, cart_comm, MPI_STATUS_IGNORE);
                 MPI_Recv(pivot_row_I.data(), N, MPI_DOUBLE, left, 1, cart_comm, MPI_STATUS_IGNORE);
 
-                // Krok 3: Podaj dalej (Sztafeta), ALE tylko jeśli sąsiad po prawej to nie właściciel
-                // (żeby wiadomość nie zrobiła pełnego kółka i nie trafiła z powrotem do nadawcy)
+                // Krok 3: Podaj dalej, jeśli sąsiad po prawej to nie właściciel
                 if (right != owner_rank) {
                     MPI_Send(pivot_row_A.data(), N, MPI_DOUBLE, right, 0, cart_comm);
                     MPI_Send(pivot_row_I.data(), N, MPI_DOUBLE, right, 1, cart_comm);
                 }
             }
 
-            // Krok 4: Eliminacja (wszyscy robią to samo, gdy już mają dane)
+            // Krok 4: Eliminacja Gaussa
             for (int i = 0; i < rows_per_proc; i++) {
                 int global_current_row = start_row + i;
                 if (global_current_row != k) {
@@ -186,6 +200,7 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Zbieranie wyników
         vector<double> global_inv;
         if (rank == 0) global_inv.resize(N * N);
 
@@ -198,10 +213,11 @@ int main(int argc, char** argv) {
 
         if (rank == 0) {
             if (N == 3) {
-                cout << "Wynik (Macierz odwrotna):" << endl;
+                cout << "Wynik (Macierz odwrotna - MPI):" << endl;
                 printMatrix(global_inv, N);
                 cout << "-----------" << endl;
             }
+            // Wyświetlenie obu czasów
             cout << "MPI RING (Sztafeta) (" << size << " procesow): " << par_duration << " s" << endl;
         }
     }
