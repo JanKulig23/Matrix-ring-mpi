@@ -60,7 +60,7 @@ int main(int argc, char** argv) {
     // 1. TWORZENIE PIERŚCIENIA
     MPI_Comm cart_comm;
     int dims[1] = {world_size};
-    int periods[1] = {1}; // 1 = Pierścień (Cykliczny)
+    int periods[1] = {1};
     int reorder = 1;      
     MPI_Cart_create(MPI_COMM_WORLD, 1, dims, periods, reorder, &cart_comm);
 
@@ -69,14 +69,14 @@ int main(int argc, char** argv) {
     MPI_Comm_size(cart_comm, &size);
 
     // 2. USTALENIE SĄSIADÓW
-    // left - sąsiad, od którego odbieram
-    // right - sąsiad, do którego wysyłam
+    // left - sąsiad od którego odbieramy
+    // right - sąsiad do którego wysyłamy
     int left, right;
     MPI_Cart_shift(cart_comm, 0, 1, &left, &right);
 
-    // Weryfikacja topologii (tylko raz)
+    // Weryfikacja topologii 
     if (rank == 0) {
-        printf("--- Weryfikacja Ring (Shift) ---\n");
+        printf("Weryfikacja Ring (Shift)\n");
     }
     MPI_Barrier(cart_comm);
     printf("Rank %d: Odbieram od %d, Wysylam do %d\n", rank, left, right);
@@ -92,7 +92,6 @@ int main(int argc, char** argv) {
         int N = 0;
         if (rank == 0) N = test_sizes[t];
 
-        // Rozgłoszenie rozmiaru N (techniczne)
         MPI_Bcast(&N, 1, MPI_INT, 0, cart_comm);
 
         if (N % size != 0) {
@@ -115,7 +114,7 @@ int main(int argc, char** argv) {
 
         double seq_duration = 0.0;
 
-        // --- CZĘŚĆ 1: PRZYGOTOWANIE I OBLICZENIA SEKWENCYJNE (TYLKO RANK 0) ---
+        //Część 1: PRZYGOTOWANIE I OBLICZENIA SEKWENCYJNE (TYLKO RANK 0)
         if (rank == 0) {
             cout << "\n=== N = " << N << " ===" << endl;
             
@@ -127,8 +126,7 @@ int main(int argc, char** argv) {
                 global_A = generateMatrix(N);
             }
 
-            // Pomiar czasu sekwencyjnego
-            vector<double> A_seq_copy = global_A; // Kopia
+            vector<double> A_seq_copy = global_A; 
             double t_seq_start = MPI_Wtime();
             invertSequential(A_seq_copy, N);
             double t_seq_end = MPI_Wtime();
@@ -137,7 +135,7 @@ int main(int argc, char** argv) {
             cout << "Sekwencyjnie (1 proces): " << seq_duration << " s" << endl;
         }
 
-        // --- CZĘŚĆ 2: OBLICZENIA RÓWNOLEGŁE (MPI RING) ---
+        //Część 2: OBLICZENIA RÓWNOLEGŁE (MPI RING)
         MPI_Barrier(cart_comm);
         double t_par_start = MPI_Wtime();
 
@@ -171,7 +169,7 @@ int main(int argc, char** argv) {
                     local_I[local_k * N + j] = pivot_row_I[j];
                 }
 
-                // Sztafeta: Wyślij do prawego sąsiada
+                // Wyślij do prawego sąsiada
                 MPI_Send(pivot_row_A.data(), N, MPI_DOUBLE, right, 0, cart_comm);
                 MPI_Send(pivot_row_I.data(), N, MPI_DOUBLE, right, 1, cart_comm);
             } 
@@ -218,7 +216,7 @@ int main(int argc, char** argv) {
                 cout << "-----------" << endl;
             }
             // Wyświetlenie obu czasów
-            cout << "MPI RING (Sztafeta) (" << size << " procesow): " << par_duration << " s" << endl;
+            cout << "MPI RING (" << size << " procesow): " << par_duration << " s" << endl;
         }
     }
 
